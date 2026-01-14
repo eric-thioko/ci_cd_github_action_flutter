@@ -108,15 +108,20 @@ jobs:
 
       # STEP 1: Decode Keystore dari GitHub Secrets
       # File keystore (.jks/.keystore) harus di-encode ke base64 dan disimpan di GitHub Secrets.
+      # Keystore disimpan di folder android/ (bukan android/app/)
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
           # Decode base64 string menjadi file keystore
           echo "$KEYSTORE_BASE64" | base64 --decode > android/upload-keystore.jks
+          # Verifikasi file berhasil dibuat
+          ls -la android/upload-keystore.jks
 
       # STEP 2: Create key.properties
       # File ini berisi kredensial untuk signing, dibaca oleh build.gradle
+      # PENTING: storeFile path RELATIF terhadap android/app/, bukan root project!
+      # Karena keystore ada di android/, maka dari android/app/ kita pakai ../
       - name: Create key.properties
         env:
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -127,7 +132,7 @@ jobs:
           storePassword=$KEYSTORE_PASSWORD
           keyPassword=$KEY_PASSWORD
           keyAlias=$KEY_ALIAS
-          storeFile=android/upload-keystore.jks
+          storeFile=../upload-keystore.jks
           EOF
 
       # STEP 3: Build APK (Signed)
@@ -175,7 +180,7 @@ jobs:
     # Sama seperti Android, hanya build kalau push ke main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       # Setup Flutter di Mac.
       - name: Set up Flutter
