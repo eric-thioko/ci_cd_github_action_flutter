@@ -127,7 +127,7 @@ jobs:
           storePassword=$KEYSTORE_PASSWORD
           keyPassword=$KEY_PASSWORD
           keyAlias=$KEY_ALIAS
-          storeFile=keystore.jks
+          storeFile=upload-keystore.jks
           EOF
 
       # STEP 3: Build APK (Signed)
