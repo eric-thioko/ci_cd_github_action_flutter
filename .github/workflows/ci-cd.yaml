@@ -1,80 +1,204 @@
+# Nama workflow yang akan muncul di tab "Actions" di GitHub repository Anda.
 name: Flutter CI/CD
+
+# -----------------------------------------------------------------------------
+# TRIGGER (Pemicu)
+# Bagian ini menentukan KAPAN workflow ini akan berjalan.
+# -----------------------------------------------------------------------------
 on:
+  # Jalan ketika ada code yang di-push ke branch 'main'
   push:
     branches:
       - main
+  # Jalan ketika ada Pull Request yang targetnya ke branch 'main'
   pull_request:
     branches:
       - main
+
+# -----------------------------------------------------------------------------
+# CONCURRENCY (Manajemen Antrian)
+# Fitur ini untuk menghemat resource/biaya GitHub Actions.
+# -----------------------------------------------------------------------------
 concurrency:
+  # Membuat grup berdasarkan nama workflow dan referensi branch (misal: refs/heads/main).
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Jika ada push baru (commit baru) sementara proses lama masih jalan,
+  # proses lama akan dibatalkan (cancel) dan diganti proses baru.
   cancel-in-progress: true
+
+# -----------------------------------------------------------------------------
+# JOBS (Daftar Pekerjaan)
+# Daftar tugas yang akan dieksekusi oleh komputer server (runner).
+# -----------------------------------------------------------------------------
 jobs:
+  # --- JOB 1: TESTING ---
+  # Tugas: Memastikan kode bersih dan lulus tes sebelum dibuild.
   test:
+    # Menggunakan OS Linux (paling murah dan cepat untuk task umum).
     runs-on: ubuntu-latest
     steps:
+      # 1. Mengambil source code Anda dari repository.
       - uses: actions/checkout@v6
+
+      # 2. Menyiapkan environment Flutter.
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: "stable"
+          # Menggunakan versi flutter yang sama persis dengan yang tertulis di pubspec.yaml
+          # agar konsisten dengan environment lokal Anda.
           flutter-version-file: pubspec.yaml
+          # Mengaktifkan caching agar download SDK flutter lebih cepat di run berikutnya.
           cache: true
+
+      # 3. Cek versi untuk memastikan setup berhasil (berguna untuk debugging log).
       - name: Verify Flutter version
         run: flutter --version
+
+      # 4. Download library/package yang dibutuhkan aplikasi.
       - name: Install dependencies
         run: flutter pub get
+
+      # 5. Analisis kode (linter) untuk mencari warning/error style code.
       - name: Analyze code
         run: flutter analyze
+
+      # 6. Jalankan Unit Test & Widget Test.
       - name: Run tests
         run: flutter test
+
+  # --- JOB 2: BUILD ANDROID ---
+  # Tugas: Membuat file APK.
   build-android:
     runs-on: ubuntu-latest
+    # PENTING: Job ini hanya jalan kalau job 'test' sukses. Kalau tes gagal, build tidak dijalankan.
     needs: test
+    # Kondisi: Hanya jalan saat 'push' ke 'main'.
+    # Kita tidak mau build APK setiap kali ada Pull Request (hemat waktu & kuota).
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+
+      # Setup Java JDK 17. Android build butuh Java/Gradle.
+      # Versi 17 adalah standar untuk Flutter/Android build tools terbaru.
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: "zulu"
           java-version: "17"
-          cache: "gradle"
+          cache: "gradle" # Cache gradle agar build berikutnya lebih ngebut.
+
+      # Setup Flutter lagi (tiap job berjalan di mesin virtual bersih/baru, jadi harus setup ulang).
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: "stable"
           flutter-version-file: pubspec.yaml
           cache: true
+
       - name: Verify Flutter version
         run: flutter --version
+
       - name: Install dependencies
         run: flutter pub get
-      - name: Build APK
+
+      # ========================================================================
+      # CODE SIGNING STEPS - ANDROID
+      # ========================================================================
+
+      # STEP 1: Decode Keystore dari GitHub Secrets
+      # File keystore (.jks/.keystore) harus di-encode ke base64 dan disimpan di GitHub Secrets.
+      - name: Decode Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Decode base64 string menjadi file keystore
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/keystore.jks
+
+      # STEP 2: Create key.properties
+      # File ini berisi kredensial untuk signing, dibaca oleh build.gradle
+      - name: Create key.properties
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cat > android/key.properties << EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=keystore.jks
+          EOF
+
+      # STEP 3: Build APK (Signed)
+      # APK yang dihasilkan sudah ditandatangani dan siap untuk distribusi.
+      - name: Build Signed APK
         run: flutter build apk --release
-      - name: Upload APK
+
+      # STEP 4: Build AAB (Android App Bundle - Signed)
+      # AAB adalah format yang direkomendasikan untuk upload ke Google Play Store.
+      # Google Play akan generate APK yang dioptimalkan untuk device tertentu.
+      - name: Build Signed AAB
+        run: flutter build appbundle --release
+
+      # STEP 5: Upload APK
+      # Menyimpan hasil build (APK) agar bisa didownload dari halaman GitHub Actions.
+      - name: Upload Signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
+          name: release-apk-signed
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      # STEP 6: Upload AAB
+      # Menyimpan hasil build (AAB) untuk upload ke Google Play Store.
+      - name: Upload Signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab-signed
+          path: build/app/outputs/bundle/release/app-release.aab
+
+      # STEP 7: Cleanup (Keamanan)
+      # Hapus file keystore dan key.properties setelah build selesai.
+      - name: Cleanup sensitive files
+        if: always() # Selalu jalankan step ini meskipun build gagal
+        run: |
+          rm -f android/app/keystore.jks
+          rm -f android/key.properties
+
+  # --- JOB 3: BUILD IOS ---
+  # Tugas: Membuat file .app iOS.
   build-ios:
+    # Build iOS WAJIB pakai macOS. Perlu diingat, menit macOS di GitHub Actions
+    # "memakan" kuota gratis 10x lebih cepat dibanding Linux.
     runs-on: macos-latest
     needs: test
+    # Sama seperti Android, hanya build kalau push ke main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+
+      # Setup Flutter di Mac.
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: "stable"
           flutter-version-file: pubspec.yaml
           cache: true
+
       - name: Verify Flutter version
         run: flutter --version
+
       - name: Install dependencies
         run: flutter pub get
+
+      # Build iOS mode release.
+      # --no-codesign: Kita build tanpa sertifikat Apple Developer (Provisioning Profile).
+      # Ini menghasilkan file .app yang bisa dites di Simulator, tapi belum bisa upload ke AppStore/TestFlight.
+      # Untuk upload ke Store, perlu setup sertifikat & secrets yang lebih kompleks.
       - name: Build iOS app
         run: flutter build ios --release --no-codesign
+
+      # Upload hasil build iOS.
       - name: Upload iOS build
         uses: actions/upload-artifact@v4
         with:
